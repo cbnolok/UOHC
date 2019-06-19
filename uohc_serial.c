@@ -15,11 +15,18 @@
     along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
-//TODO
-//support no prefix or suffix (really needed?)
-//linux and mac test for priority setting
+/* Compilation tips
+    (When using visual studio, you need to set this preprocessor macro: _CRT_SECURE_NO_WARNINGS)
+
+    Enable every possible optimization (remember omit frame pointer) and disable every possible additional compiler security check.
+     In particular, when using Visual Studio, disable C++ exceptions, safety checks (/Gs-), SDL checks (/sdl-), Control Flow Guard (/GUARD:NO).
+     Having them enabled makes the code slower, and you don't want that for a brute-force attack :)
+*/
 
 // For testing purposes: Hash=(0x)280F5FD7008898E6 | prefix=build/gumpartlegacymul/ | suffix=.tga | min_len=1 | max_len=8 | charset=0123456789 | result = build/gumpartlegacymul/00001283.tga
+
+//TODO
+//linux and mac test for priority setting
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,14 +42,14 @@
     #include <unistd.h>
     #include <sys/resource.h>
 #endif
-/*
-#ifdef _MSC_VER
+#ifdef _WIN32
     #include <malloc.h>
-    #define alloca _alloca
+    #ifdef _MSC_VER
+        #define alloca _alloca
+    #endif
 #else
     #include <alloca.h>
 #endif
-*/
 
 //Size for the char array containing input (before transferring it into the different variables)
 #define MAX_ARG_LEN 60
@@ -68,16 +75,39 @@ unsigned int key_maxlen;
 char* key;	                //for the matching (cracked) string (prefix+filename+suffix)
 
 // globals for cracking
+uint32_t hash_magic = 0;                //preprocessed var for hash calculation
 unsigned int generated_len = 0;         //length of generated string
 unsigned int generated_len_minus = 0;   //generated_len - 1
 unsigned int concatenated_len = 0;      //length of concatenated string
-char* concatenated = NULL;		        //concatenated string (prefix+generatedString+suffix)
-char* concatenated_gen = NULL;          //pointer to the place in the concatenated string where to start to put the generatedString
-uint32_t concat_len_reg = 0;            //preprocessed var for hash calculation
+
+const char* stack_charset = NULL;       //copy of charset on the stack, instead of reading that from the heap
+char* stack_concatenated = NULL;		//concatenated string (prefix+generatedString+suffix)
+char* stack_concatenated_offset = NULL; //pointer to the place in the concatenated string (allocated on the stack) where to start to put the generatedString
 
 // to manage the process
 char working = 0;
 char stop = 0;
+
+
+/* Handler for CTRL + C */
+
+void sig_handler(int signo)
+{
+    if (working)
+        stop = 1;
+}
+
+
+/* Self explanatory */
+
+void pre_exit(int force)
+{
+    printf("\nPress a key to exit.");
+    getchar();
+
+    if (force)
+        exit(1);
+}
 
 
 /* Hash function */
@@ -88,12 +118,12 @@ static inline ullong hashcalc()
     uint32_t eax, ecx, edx, ebx, esi, edi;
 
     eax = ecx = edx = 0;
-    ebx = edi = esi = concat_len_reg;
+    ebx = edi = esi = hash_magic;
     //ebx = edi = esi = (uint32_t)concatenated_len + 0xDEADBEEF;
 
     unsigned int i, diff;
 
-#define str concatenated //for the sake of shortness
+#define str stack_concatenated //for the sake of shortness
     for (i = 0; i + 12 < concatenated_len; i += 12)
     {
         edi = (uint32_t)((str[i + 7] << 24) | (str[i + 6] << 16) | (str[i + 5] << 8) | str[i + 4]) + edi;
@@ -250,49 +280,88 @@ static inline ullong hashcalc()
 
 /* Brute force function */
 
-static void recursecrack(const unsigned int position)
+static void crack_recurse(const unsigned int position)
 {
     for (unsigned int i = 0; i < charset_len; ++i)
     {
-        concatenated_gen[position] = charset[i];
+        stack_concatenated_offset[position] = stack_charset[i];
         if (position < generated_len_minus)
         {
-            recursecrack(position + 1);
+            crack_recurse(position + 1);
         }
         else
         {
             if (hashcalc() == hash)
             {
                 stop = 1;
-                strcpy(key, concatenated);
+                strcpy(key, stack_concatenated);
                 return;
             }
         }
     }
 }
 
-
-/*	Handler for CTRL + C	*/
-
-void sig_handler(int signo)
+/* Core */
+static void start_crack()
 {
-    if (working)
-        stop = 1;
+    working = 1;
+
+    /* Initializing initialize-once variables */
+
+    printf("\nTo abort the computation, press CTRL + C.");
+    printf("\nStarting...\n");
+
+    //note: as said, strlen doesn't count the terminator '\0', which in this case is fine
+    key_maxlen = prefix_len + filename_maxlen + suffix_len + 1;	//+1 for the "\0" terminator
+    key = calloc(key_maxlen, sizeof(char));
+
+    // Having *very* frequently accessed vars allocated in the stack instead of the heap results in faster access
+    //  (even if, i have to say, with Visual Studio 2019 x64 and every optimization, i can't notice the difference in speed, which is great in the parallel version instead)
+    // Memory allocated with alloca is freed at the exit of the function (not of the scope): don't allocate more than once.
+    stack_charset = alloca((charset_len + 1) * sizeof(char));
+    memcpy((char*)stack_charset, charset, charset_len + 1);
+
+    stack_concatenated = alloca((key_maxlen + 1) * sizeof(char));
+    stack_concatenated_offset = stack_concatenated + prefix_len;
+
+
+    /* Loop that generates and checks strings of increasing length */
+
+    time_t t; //for time tracking
+    for (generated_len = filename_minlen; generated_len <= filename_maxlen && !stop; ++generated_len)
+    {
+        /* initialize variables for: generated string, concatenated string, concatenated string length */
+        concatenated_len = prefix_len + generated_len + suffix_len;
+
+        memcpy(stack_concatenated, prefix, prefix_len);
+        memcpy(stack_concatenated + prefix_len + generated_len, suffix, suffix_len);
+        *(stack_concatenated + concatenated_len) = '\0';
+
+        hash_magic = (uint32_t)concatenated_len + 0xDEADBEEF;
+        generated_len_minus = generated_len - 1;
+
+        time(&t);
+        printf("Checking passwords width [ %d ]...   Started: %s", generated_len, asctime(localtime(&t)));
+
+        crack_recurse(filename_minlen - 1);
+    }
+
+    time(&t);
+    printf("Ended: %s", asctime(localtime(&t)));
+
+    working = 0;
 }
-
-
-//-------------------------------
 
 
 int main()
 {
     printf("UOHC: Ultima Online UOP Hash Cracker.");
-    printf("\nv2.0 CPU SERIAL algorithm (single-threaded).");
+    printf("\nv2.0.1 CPU SERIAL algorithm (single-threaded).");
 
     /*	Enable handling CTRL + C */
 
     if (signal(SIGINT, sig_handler) == SIG_ERR)
-        printf("\nWarning: Can't catch SIGINT. If you want to stop the program you have to close it manually.\n");
+        printf("\n\nWarning: Can't catch SIGINT. If you want to stop the program you have to close it manually.\n");
 
 
     /* Setting high priority for the process */
@@ -318,7 +387,6 @@ int main()
     default: printf("Default error?\n"); break;
     }
 
-    time_t t;			    //for time tracking
     char another_hash = 0;  //stores the answer when asked for cracking another hash
     char* buf = calloc(MAX_ARG_LEN, sizeof(char));			//initialize buffer for storing inserted parameters
     while (1)
@@ -395,6 +463,7 @@ int main()
             } while (*buf == '\n');
             charset = malloc(strlen(buf) * sizeof(char));		//strlen counts \n, which i overwrite with \0, the string terminator character
             strcpy(charset, buf);
+            charset_len = (unsigned)(strlen(charset) - 1);
         }
         else
         {
@@ -402,13 +471,12 @@ int main()
             fgets(buf, MAX_ARG_LEN, stdin);
             if (*buf != '\n')
             {
-                free(charset);
                 charset = realloc(charset, strlen(buf) * sizeof(char));
                 strcpy(charset, buf);
+                charset_len = (unsigned)(strlen(charset) - 1);
             }
         }
-        charset_len = (unsigned)(strlen(charset) - 1);
-        charset[charset_len] = '\0'; // get rid of \n
+        charset[charset_len] = '\0';
         memset(buf, '\0', MAX_ARG_LEN * sizeof(char));
 
         if (!another_hash)
@@ -420,6 +488,7 @@ int main()
             } while (*buf == '\n');
             prefix = malloc(strlen(buf) * sizeof(char));
             strcpy(prefix, buf);
+            prefix_len = (unsigned)(strlen(prefix) - 1);
         }
         else
         {
@@ -427,13 +496,12 @@ int main()
             fgets(buf, MAX_ARG_LEN, stdin);
             if (*buf != '\n')
             {
-                free(prefix);
                 prefix = realloc(prefix, strlen(buf) * sizeof(char));
                 strcpy(prefix, buf);
+                prefix_len = (unsigned)(strlen(prefix) - 1);
             }
         }
-        prefix_len = (unsigned)(strlen(prefix) - 1);
-        prefix[prefix_len] = '\0'; // get rid of \n
+        prefix[prefix_len] = '\0';
         memset(buf, '\0', MAX_ARG_LEN * sizeof(char));
 
         if (!another_hash)
@@ -445,6 +513,7 @@ int main()
             } while (*buf == '\n');
             suffix = malloc(strlen(buf) * sizeof(char));
             strcpy(suffix, buf);
+            suffix_len = (unsigned)(strlen(suffix) - 1);
         }
         else
         {
@@ -452,64 +521,18 @@ int main()
             fgets(buf, MAX_ARG_LEN, stdin);
             if (*buf != '\n')
             {
-                free(suffix);
                 suffix = realloc(suffix, strlen(buf) * sizeof(char));
                 strcpy(suffix, buf);
+                suffix_len = (unsigned)(strlen(suffix) - 1);
             }
         }
-        suffix_len = (unsigned)(strlen(suffix) - 1);
-        suffix[suffix_len] = '\0'; // get rid of \n
+        suffix[suffix_len] = '\0';
         memset(buf, '\0', MAX_ARG_LEN * sizeof(char));
 
 
-        /*	Initializing initialize-once variables */
+        /*	Move to actual cracking code */
 
-        //note: as said, strlen doesn't count the terminator '\0', which in this case is fine
-        key_maxlen = prefix_len + filename_maxlen + suffix_len + 1;	//+1 for the "\0" terminator
-        key = calloc(key_maxlen, sizeof(char));
-
-        // Having *very* frequently accessed vars allocated in the stack instead of the heap results in faster access
-        //  Memory allocated with alloca is freed at the exit of the function (not of the scope): don't allocate more than once.
-        concatenated = calloc(key_maxlen, sizeof(char));
-        concatenated_gen = concatenated + prefix_len;
-        /*
-        // For some reason, on Visual studio 2019 64 bits, the _alloca version is slower than using malloc/calloc
-        if (stack_concatenated == NULL)
-            stack_concatenated = alloca(key_maxlen * sizeof(char));
-
-        if (stack_charset == NULL)
-            stack_charset = alloca((charset_len + 1) * sizeof(char));
-        memcpy(stack_charset, charset, charset_len + 1);
-        */
-
-        printf("\nTo abort the computation, press CTRL + C.");
-        printf("\nStarting...\n");
-        working = 1;
-
-
-        /*	Start cracking	*/
-
-        for (generated_len = filename_minlen; generated_len <= filename_maxlen && !stop; ++generated_len)
-        {
-            /* initialize variables for: generated string, concatenated string, concatenated string length */
-            memset(concatenated, '\0', key_maxlen * sizeof(char));
-            concatenated_len = prefix_len + generated_len + suffix_len;
-
-            memcpy(concatenated, prefix, prefix_len);
-            memcpy(concatenated + prefix_len + generated_len, suffix, suffix_len);
-            concat_len_reg = (uint32_t)concatenated_len + 0xDEADBEEF;
-            generated_len_minus = generated_len - 1;
-
-            time(&t);
-            printf("Checking passwords width [ %d ]...   Started: %s", generated_len, asctime(localtime(&t)));
-
-            recursecrack(filename_minlen - 1);
-        }
-
-        time(&t);
-        printf("Ended: %s", asctime(localtime(&t)));
-
-        free(concatenated);
+        start_crack();
 
 
         /*	End of the process or aborted	*/
@@ -541,7 +564,8 @@ int main()
 
         stop = 0;
     }
-    printf("\nExiting.");
+    
+    pre_exit(0);
 }
 
 

@@ -15,8 +15,16 @@
     along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
-//TODO
-//support no prefix or suffix
+/* Compilation tips
+    (When using visual studio, you need to set this preprocessor macro: _CRT_SECURE_NO_WARNINGS)
+
+    Enable every possible optimization (remember omit frame pointer) and disable every possible additional compiler security check.
+     In particular, when using Visual Studio, disable C++ exceptions, safety checks (/Gs-), SDL checks (/sdl-), Control Flow Guard (/GUARD:NO).
+     Having them enabled makes the code slower, and you don't want that for a brute-force attack :)
+
+    Enable parallelization using OpenMP:
+     you need to add the option -fopenmp to gcc, /openmp to cl (visual C++ compiler) or -openmp-stubs to ICC (intel C compiler)
+*/
 
 // For testing purposes: Hash=(0x)280F5FD7008898E6 | prefix=build/gumpartlegacymul/ | suffix=.tga | min_len=1 | max_len=8 | charset=0123456789 | result = build/gumpartlegacymul/00001283.tga
 
@@ -37,20 +45,20 @@
     #include <sys/sysinfo.h>
 #endif
 */
-/*
-#ifdef _MSC_VER
+
+#ifdef _WIN32
     #include <malloc.h>
-    #define alloca _alloca
+    #ifdef _MSC_VER
+        #define alloca _alloca
+    #endif
 #else
     #include <alloca.h>
 #endif
-*/
+
 
 //Size for the char array containing input (before transferring it into different variables)
 #define MAX_ARG_LEN 60
 
-//Enable parallelization using OpenMP:
-//	you need to add the option -fopenmp to gcc, /openmp to cl (visual C++ compiler) or -openmp-stubs to ICC (intel C compiler)
 #if defined (_OPENMP)
     #define PARALLELIZATION 1
 #else
@@ -82,20 +90,45 @@ int stop = 0;
 char* key;			//for the matching (cracked) string (prefix+filename+suffix)
 
 
+/* Handler for CTRL + C */
+
+void sig_handler(int signo)
+{
+    if (working)
+        stop = 1;
+}
+
+
+/* Self explanatory */
+
+void pre_exit(int force)
+{
+    printf("\nPress a key to exit.");
+    getchar();
+
+    if (force)
+        exit(1);
+}
+
+
 /* Hash function */
 
 //This is a slightly optimized adaptation of the C# algorithm by Malganis, which is included in Mythic Package Editor sources
-static inline ullong hashcalc(const char* str, const unsigned int concat_len, const uint32_t concat_len_reg)
+static inline ullong hashcalc(
+    const char* str,
+    const unsigned int concatenated_len,// pre calculated length of str
+    const uint32_t hash_magic           // pre calculated magic value, dependant on the length of str
+)
 {
     uint32_t eax, ecx, edx, ebx, esi, edi;
 
     eax = ecx = edx = 0;
-    ebx = edi = esi = concat_len_reg;
-    //ebx = edi = esi = (uint32_t)concat_len + 0xDEADBEEF;
+    ebx = edi = esi = hash_magic;
+    //ebx = edi = esi = (uint32_t)concatenated_len + 0xDEADBEEF;
 
     unsigned int i, diff;
 
-    for (i = 0; i + 12 < concat_len; i += 12)
+    for (i = 0; i + 12 < concatenated_len; i += 12)
     {
         edi = (uint32_t)((str[i + 7] << 24) | (str[i + 6] << 16) | (str[i + 5] << 8) | str[i + 4]) + edi;
         esi = (uint32_t)((str[i + 11] << 24) | (str[i + 10] << 16) | (str[i + 9] << 8) | str[i + 8]) + esi;
@@ -115,7 +148,7 @@ static inline ullong hashcalc(const char* str, const unsigned int concat_len, co
         edi += ebx;
     }
 
-    diff = (concat_len - i);
+    diff = (concatenated_len - i);
     if (diff > 0)
     {
         if (diff == 12)
@@ -248,9 +281,121 @@ static inline ullong hashcalc(const char* str, const unsigned int concat_len, co
 }
 
 
+/* Cracking algorithm */
+
+static void crack_seed_range(
+    const unsigned int generated_len,
+    const ullong seed_len_first,
+    const ullong seed_len_slast
+)
+{
+    unsigned int concatenated_len;   //length of the strings generated for this cycle, concatenated to prefix and suffix
+    concatenated_len = prefix_len + generated_len + suffix_len;
+
+    #pragma omp parallel shared(stop) if (PARALLELIZATION)
+    {
+        /* initialize the arrays that will contain the generated and the concatenated string */
+
+        // alloca allocates the memory on the stack (accessing that memory is way faster than the one allocated on the heap),
+        //  and the memory is freed automatically when the function exits (not when the variable goes out of scope, also the call to free isn't needed)
+        char * const concatenated = alloca((concatenated_len + 1) * sizeof(char));
+        memcpy(concatenated, prefix, prefix_len);
+        memcpy(concatenated + prefix_len + generated_len, suffix, suffix_len);
+        *(concatenated + concatenated_len) = '\0';
+
+        // where to start placing the generated characters in the pre-concatenated string
+        char * const generate_offset = concatenated + prefix_len;
+
+        const char * const local_charset = alloca((charset_len + 1) * sizeof(char));
+        memcpy((char*)local_charset, charset, (charset_len + 1) * sizeof(char));
+
+        // prepare this value for hash function; it's convenient to do this operation once for
+        //	each group of strings of fixed length, instead of at each function call
+        const uint32_t hash_magic = (uint32_t)concatenated_len + 0xDEADBEEF;
+
+        // store in contiguous memory once this stuff (faster access, less assembly instructions and memory reads)
+        const ullong local_hash = hash;
+        const unsigned int local_charset_len = charset_len;
+
+
+        /* Generate the strings */
+
+        if (seed_len_slast <= UINT_MAX)
+        {
+            // no need to use 64 bits registers and operations if we know that 32 bits one will suffice (for the current max seed)
+            //  (performance improvement is real)
+            const unsigned int uint_seed_len_slast = (unsigned int)seed_len_slast;
+            unsigned int seed;
+            #pragma omp for schedule(static) private(seed)
+            for (seed = (unsigned int)seed_len_first; seed < uint_seed_len_slast; ++seed)
+            {
+#if defined(PARALLELIZATION)
+                if (!stop)	// need to check if we have finished by this way because of OpenMP
+#endif
+                {
+                    /* generate the string from the seed */
+                    unsigned int seed_p = seed;
+                    for (unsigned int pos = 0; pos < generated_len; ++pos)
+                    {
+                        *(generate_offset + pos) = local_charset[seed_p % local_charset_len];
+                        seed_p /= local_charset_len;
+                    }
+
+                    /* check if the hashed string matches the hash we are cracking */
+                    if (hashcalc(concatenated, concatenated_len, hash_magic) == local_hash)
+                    {
+                        #pragma omp critical
+                        {
+                            stop = 1;
+                            strcpy(key, concatenated);
+                        }
+#if !defined(PARALLELIZATION)
+                        return;
+#endif
+                    }
+                }
+            }
+        }
+        else
+        {
+            ullong seed;
+            #pragma omp for schedule(static) private(seed)
+            for (seed = seed_len_first; seed < seed_len_slast; ++seed)
+            {
+#if defined(PARALLELIZATION)
+                if (!stop)	// need to check if we have finished by this way because of OpenMP
+#endif
+                {
+                    /* generate the string from the seed */
+                    ullong seed_p = seed;
+                    for (unsigned int pos = 0; pos < generated_len; ++pos)
+                    {
+                        *(generate_offset + pos) = local_charset[seed_p % local_charset_len];
+                        seed_p /= local_charset_len;
+                    }
+
+                    /* check if the hashed string matches the hash we are cracking */
+                    if (hashcalc(concatenated, concatenated_len, hash_magic) == local_hash)
+                    {
+                        #pragma omp critical
+                        {
+                            stop = 1;
+                            strcpy(key, concatenated);
+                        }
+#if !defined(PARALLELIZATION)
+                        return;
+#endif
+                    }
+                }
+            }
+        }
+    }
+}
+
+
 /* Custom power function */
 
-static inline ullong my_power(const unsigned int base, const unsigned int exp) //meant to be used only for positive numbers!
+static inline ullong my_pow(const unsigned int base, const unsigned int exp) //meant only for positive integers
 {
     if (exp == 0)
         return 1;
@@ -261,12 +406,72 @@ static inline ullong my_power(const unsigned int base, const unsigned int exp) /
 }
 
 
-/*	Handler for CTRL + C */
+/* Core */
 
-void sig_handler(int signo)
+static void start_crack()
 {
-    if (working)
-        stop = 1;
+    working = 1;
+
+    /*	Initializing  */
+
+    printf("\nIf you want to abort computation, press CTRL + C.");
+    printf("\nInitializing...");
+
+    //note: as said, strlen doesn't count the terminator '\0', which in this case is fine
+    key_maxlen = prefix_len + filename_maxlen + suffix_len + 1;	//+1 for the "\0" terminator
+    key = calloc (key_maxlen, sizeof(char)); //using calloc because it's good to have the vars 0 initialized
+
+    // number of maximum combinations we can get with length = filename_maxlen
+    ullong combinations_max = 0;
+    // array containing the number of maximum combinations for each output string length
+    ullong* combinations_len;     //index starts from 1, not from 0
+    combinations_len = malloc((filename_maxlen + 1) * sizeof(ullong));
+
+
+    /* Loop that generates and checks strings of increasing length */
+
+    time_t t;   //for time tracking
+    for (unsigned int generated_len = 1; generated_len <= filename_maxlen; ++generated_len)
+    {
+        const ullong tmp_combinations_max = combinations_max;
+        combinations_max += my_pow(charset_len, generated_len);
+        if (combinations_max < tmp_combinations_max)
+        {
+            // overflow
+            printf("\nFATAL: The combinations to generate will be so many that the internal algorithm will break.");
+            printf("\n Try with a smaller charset or length.");
+            pre_exit(1);
+        }
+
+        combinations_len[generated_len] = combinations_max;
+    }
+    combinations_len[0] = 0;
+
+    printf("\nStarting...\n");
+    working = 1;
+
+
+    /* Start generating strings */
+
+    unsigned int generated_len; //length of the strings generated for this cycle
+    ullong seed_len_first;      //first seed generating a string of length "generated_len"
+    ullong seed_len_slast;      //second last (penultimate) seed generating a string of length "generated_len"
+    //ullong seed = 0;          //seed from which the string is generated; seed determine both length and characters
+    for (generated_len = filename_minlen; (generated_len <= filename_maxlen) && !stop; ++generated_len)
+    {
+        seed_len_first = combinations_len[generated_len - 1];
+        seed_len_slast = combinations_len[generated_len];
+        time(&t);
+        printf("Checking passwords width [ %d ]...   Started: %s", generated_len, asctime(localtime(&t)));
+
+        crack_seed_range(generated_len, seed_len_first, seed_len_slast);
+    }
+
+    time(&t);
+    printf("Ended: %s", asctime(localtime(&t)));
+
+    free(combinations_len);
+    working = 0;
 }
 
 
@@ -275,20 +480,19 @@ void sig_handler(int signo)
 int main()
 {
     printf("UOHC: Ultima Online UOP Hash Cracker.");
-    printf("\nv2.0 CPU PARALLEL.");
+    printf("\nv2.0.1 CPU PARALLEL algorithm.");
 #if (PARALLELIZATION)
-    printf("\nCompiled with OpenMP support (multi-threaded): on a decent multi-core cpu is faster than SERIAL algorithm.\n");
+    printf("\nCompiled with OpenMP support (multi-threaded): on a decent multi-core cpu is faster than SERIAL algorithm.");
 #else
-    printf("\nCompiled WITHOUT OpenMP support (single-threaded, always slower than serial).\n");
+    printf("\nCompiled WITHOUT OpenMP support (single-threaded, always slower than serial).");
 #endif
 
 
     /*	Enable handling CTRL + C */
 
     if (signal(SIGINT, sig_handler) == SIG_ERR)
-        printf("\nWarning: Can't catch SIGINT. If you want to stop the program you have to close it manually.\n");
+        printf("\n\nWarning: Can't catch SIGINT. If you want to stop the program you have to close it manually.\n");
 
-    time_t t;			    //for time tracking
     char another_hash = 0;  //stores the answer when asked for cracking another hash
     char* buf = calloc(MAX_ARG_LEN, sizeof(char));		//initialize buffer for storing inserted parameters
 
@@ -366,6 +570,7 @@ int main()
             } while (*buf == '\n');
             charset = malloc(strlen(buf) * sizeof(char));		//strlen counts \n, which i overwrite with \0, the string terminator character
             strcpy(charset, buf);
+            charset_len = (unsigned)(strlen(charset) - 1);
         }
         else
         {
@@ -375,9 +580,9 @@ int main()
             {
                 charset = realloc(charset, strlen(buf) * sizeof(char));
                 strcpy(charset, buf);
+                charset_len = (unsigned)(strlen(charset) - 1);
             }
         }
-        charset_len = (unsigned)(strlen(charset) - 1);
         charset[charset_len] = '\0';
         memset(buf, '\0', MAX_ARG_LEN * sizeof(char));
 
@@ -390,6 +595,7 @@ int main()
             } while (*buf == '\n');
             prefix = malloc(strlen(buf) * sizeof(char));
             strcpy(prefix, buf);
+            prefix_len = (unsigned)(strlen(prefix) - 1);
         }
         else
         {
@@ -399,9 +605,9 @@ int main()
             {
                 prefix = realloc(prefix, strlen(buf) * sizeof(char));
                 strcpy(prefix, buf);
+                prefix_len = (unsigned)(strlen(prefix) - 1);
             }
         }
-        prefix_len = (unsigned)(strlen(prefix) - 1);
         prefix[prefix_len] = '\0';
         memset(buf, '\0', MAX_ARG_LEN * sizeof(char));
 
@@ -414,6 +620,7 @@ int main()
             } while (*buf == '\n');
             suffix = malloc(strlen(buf) * sizeof(char));
             strcpy(suffix, buf);
+            suffix_len = (unsigned)(strlen(suffix) - 1);
         }
         else
         {
@@ -423,143 +630,16 @@ int main()
             {
                 suffix = realloc(suffix, strlen(buf) * sizeof(char));
                 strcpy(suffix, buf);
+                suffix_len = (unsigned)(strlen(suffix) - 1);
             }
         }
-        suffix_len = (unsigned)(strlen(suffix) - 1);
         suffix[suffix_len] = '\0';
         memset(buf, '\0', MAX_ARG_LEN * sizeof(char));
 
 
-        /*	Initializing  */
+        /*	Move to actual cracking code */
 
-        printf("\nIf you want to abort computation, press CTRL + C.");
-        printf("\nInitializing...");
-
-        //note: as said, strlen doesn't count the terminator '\0', which in this case is fine
-        key_maxlen = prefix_len + filename_maxlen + suffix_len + 1;	//+1 for the "\0" terminator
-        key = calloc (key_maxlen, sizeof(char)); //using calloc because it's good to have the vars 0 initialized
-
-        // number of maximum combinations we can get with length = filename_maxlen
-        ullong combinations_max = 0;
-        // array containing the number of maximum combinations for each output string length
-        ullong* combinations_len;     //index starts from 1, not from 0
-        combinations_len = malloc((filename_maxlen + 1) * sizeof(ullong));
-
-        for (unsigned int generated_len = 1; generated_len <= filename_maxlen; ++generated_len)
-        {
-            // TODO: check if new combinations_max becomes < than old combinations_max (catch overflow)
-            combinations_max += my_power(charset_len, generated_len);
-            combinations_len[generated_len] = combinations_max;
-        }
-        combinations_len[0] = 0;
-
-        printf("\nStarting...\n");
-        working = 1;
-
-
-        /* Start generating strings */
-
-        unsigned int curlen;      //length of the strings generated for this cycle
-        unsigned int curtotlen;   //length of the strings generated for this cycle, concatenated to prefix and suffix
-        ullong seed_len_first;    //first seed generating a string of length "curlen"
-        ullong seed_len_slast;    //second last (penultimate) seed generating a string of length "curlen"
-        //ullong seed = 0;        //seed from which the string is generated; seed determine both length and characters
-        for (curlen = filename_minlen; (curlen <= filename_maxlen) && !stop; ++curlen)
-        {
-            curtotlen = prefix_len + curlen + suffix_len;
-            seed_len_first = combinations_len[curlen - 1];
-            seed_len_slast = combinations_len[curlen];
-            time(&t);
-            printf("Checking passwords width [ %d ]...   Started: %s", curlen, asctime(localtime(&t)));
-
-            char* concat = NULL;
-            #pragma omp parallel private(concat) if (PARALLELIZATION)
-            {
-                const unsigned int local_curtotlen = curtotlen;
-
-                /* initialize the arrays that will contain the generated and the concatenated string */
-                // thanks to the private keyword of the pragma omp parallel, each thread has for itself a local copy of
-                //	concat, so that calling calloc inside this block creates a concat for each thread.
-                concat = malloc((local_curtotlen + 1) * sizeof(char));
-                *(concat + local_curtotlen) = '\0';
-
-                memcpy(concat, prefix, prefix_len);
-                memcpy(concat + prefix_len + curlen, suffix, suffix_len);
-                char* generate_offset = concat + prefix_len;     // where to store the generated string
-
-                // prepare this value for hash function; it's convenient to do this operation once for
-                //	each group of strings of fixed length, instead of at each function call
-                const uint32_t hash_curtotlen = (uint32_t)local_curtotlen + 0xDEADBEEF;
-
-                // store in contiguous memory once this stuff (faster access, less assembly instructions and memory reads)
-                const ullong local_hash = hash;
-                const unsigned int local_charset_len = charset_len;
-                const char* local_charset = charset;
-                // not sure if local_seed_* are useful, i didn't check the generated assembly for them, but i did for the vars above
-                const ullong local_seed_len_first = seed_len_first;
-                const ullong local_seed_len_slast = seed_len_slast;
-
-                if (local_seed_len_slast <= UINT_MAX)
-                {
-                    // no need to use 64 bits registers and operations if we know that 32 bits one will suffice (for the current max seed)
-                    //  (performance improvement is real)
-                    const unsigned int local_uint_seed_len_slast = (unsigned int)local_seed_len_slast;
-                    unsigned int seed;
-                    #pragma omp for schedule(static) private(seed)
-                    for (seed = (unsigned int)local_seed_len_first; seed < local_uint_seed_len_slast; ++seed)
-                    {
-                        if (!stop)	// need to check if we have finished by this way because of OpenMP
-                        {
-                            /* generate the string from the seed */
-                            unsigned int seed_p = seed;
-                            for (unsigned int pos = 0; pos < curlen; ++pos)
-                            {
-                                *(generate_offset + pos) = local_charset[seed_p % local_charset_len];
-                                seed_p /= local_charset_len;
-                            }
-
-                            /* check if the hashed string matches the hash we are cracking */
-                            if (hashcalc(concat, local_curtotlen, hash_curtotlen) == local_hash)
-                            {
-                                stop = 1;
-                                strcpy(key, concat);
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    ullong seed;
-                    #pragma omp for schedule(static) private(seed)
-                    for (seed = local_seed_len_first; seed < local_seed_len_slast; ++seed)
-                    {
-                        if (!stop)	// need to check if we have finished by this way because of OpenMP
-                        {
-                            /* generate the string from the seed */
-                            ullong seed_p = seed;
-                            for (unsigned int pos = 0; pos < curlen; ++pos)
-                            {
-                                *(generate_offset + pos) = local_charset[seed_p % local_charset_len];
-                                seed_p /= local_charset_len;
-                            }
-
-                            /* check if the hashed string matches the hash we are cracking */
-                            if (hashcalc(concat, curtotlen, hash_curtotlen) == local_hash)
-                            {
-                                stop = 1;
-                                strcpy(key, concat);
-                            }
-                        }
-                    }
-                }
-
-
-                free(concat);
-            }
-        }
-
-        time(&t);
-        printf("Ended: %s", asctime(localtime(&t)));
+        start_crack();
 
 
         /*	End of the process or aborted	*/
@@ -571,8 +651,6 @@ int main()
             printf("\nFilename found: \"%s\".\n", key);
         else
             printf("\nFilename not found.\n");
-
-        free(combinations_len);
         free(key);
 
 
@@ -594,5 +672,5 @@ int main()
         stop = 0;
     }
 
-    printf("\nExiting.");
+    pre_exit(0);
 }
