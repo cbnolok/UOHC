@@ -35,13 +35,6 @@
 #include <signal.h>
 #include <time.h>
 
-#if defined (_WIN32)
-    #define WIN32_LEAN_AND_MEAN
-    #include <windows.h>
-#elif defined (__linux__) || defined (__APPLE__) || defined (UNIX)
-    #include <unistd.h>
-    #include <sys/resource.h>
-#endif
 #ifdef _WIN32
     #include <malloc.h>
     #ifdef _MSC_VER
@@ -50,6 +43,15 @@
 #else
     #include <alloca.h>
 #endif
+
+#if defined (_WIN32)
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+#elif defined (__linux__) || defined (__APPLE__) || defined (UNIX)
+    #include <unistd.h>
+    #include <sys/resource.h>
+#endif
+
 
 //Size for the char array containing input (before transferring it into the different variables)
 #define MAX_ARG_LEN 60
@@ -85,8 +87,8 @@ char* stack_concatenated = NULL;		//concatenated string (prefix+generatedString+
 char* stack_concatenated_offset = NULL; //pointer to the place in the concatenated string (allocated on the stack) where to start to put the generatedString
 
 // to manage the process
-char working = 0;
-char stop = 0;
+unsigned char working = 0;
+unsigned char stop = 0;
 
 
 /* Handler for CTRL + C */
@@ -144,124 +146,24 @@ static inline ullong hashcalc()
         edi += ebx;
     }
 
-    diff = (concatenated_len - i);
-    if (diff > 0)
+    if (concatenated_len > i) // (diff( = concatenated_len - i) > 0)
     {
-        if (diff == 12)
+        switch (concatenated_len - i)
         {
-            esi += (uint32_t)str[i + 11] << 24;
-            esi += (uint32_t)str[i + 10] << 16;
-            esi += (uint32_t)str[i + 9] << 8;
-            esi += (uint32_t)str[i + 8];
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
+            case 12:    esi += (uint32_t)str[i + 11] << 24;
+            case 11:    esi += (uint32_t)str[i + 10] << 16;
+            case 10:    esi += (uint32_t)str[i + 9] << 8;
+            case 9:     esi += (uint32_t)str[i + 8];
+            case 8:     edi += (uint32_t)str[i + 7] << 24;
+            case 7:     edi += (uint32_t)str[i + 6] << 16;
+            case 6:     edi += (uint32_t)str[i + 5] << 8;
+            case 5:     edi += (uint32_t)str[i + 4];
+            case 4:     ebx += (uint32_t)str[i + 3] << 24;
+            case 3:     ebx += (uint32_t)str[i + 2] << 16;
+            case 2:     ebx += (uint32_t)str[i + 1] << 8;
+            case 1:     ebx += (uint32_t)str[i];
+            default:    break;
         }
-        else if (diff == 11)
-        {
-            esi += (uint32_t)str[i + 10] << 16;
-            esi += (uint32_t)str[i + 9] << 8;
-            esi += (uint32_t)str[i + 8];
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 10)
-        {
-            esi += (uint32_t)str[i + 9] << 8;
-            esi += (uint32_t)str[i + 8];
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 9)
-        {
-            esi += (uint32_t)str[i + 8];
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 8)
-        {
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 7)
-        {
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 6)
-        {
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 5)
-        {
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 4)
-        {
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 3)
-        {
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 2)
-        {
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 1)
-        {
-            ebx += (uint32_t)str[i];
-        }
-
 #undef str
 
         esi = (esi ^ edi) - ((edi >> 18) ^ (edi << 14));
@@ -282,6 +184,9 @@ static inline ullong hashcalc()
 
 static void crack_recurse(const unsigned int position)
 {
+    if (stop)
+        return;
+
     for (unsigned int i = 0; i < charset_len; ++i)
     {
         stack_concatenated_offset[position] = stack_charset[i];
@@ -304,6 +209,7 @@ static void crack_recurse(const unsigned int position)
 /* Core */
 static void start_crack()
 {
+    stop = 0;
     working = 1;
 
     /* Initializing initialize-once variables */
@@ -330,6 +236,9 @@ static void start_crack()
     time_t t; //for time tracking
     for (generated_len = filename_minlen; generated_len <= filename_maxlen && !stop; ++generated_len)
     {
+        time(&t);
+        printf("Checking passwords width [ %d ]...   Started: %s", generated_len, asctime(localtime(&t)));
+
         /* initialize variables for: generated string, concatenated string, concatenated string length */
         concatenated_len = prefix_len + generated_len + suffix_len;
 
@@ -339,9 +248,6 @@ static void start_crack()
 
         hash_magic = (uint32_t)concatenated_len + 0xDEADBEEF;
         generated_len_minus = generated_len - 1;
-
-        time(&t);
-        printf("Checking passwords width [ %d ]...   Started: %s", generated_len, asctime(localtime(&t)));
 
         crack_recurse(filename_minlen - 1);
     }
@@ -356,7 +262,7 @@ static void start_crack()
 int main()
 {
     printf("UOHC: Ultima Online UOP Hash Cracker.");
-    printf("\nv2.0.1 CPU SERIAL algorithm (single-threaded).");
+    printf("\nv2.0.2 CPU SERIAL algorithm (single-threaded).");
 
     /*	Enable handling CTRL + C */
 

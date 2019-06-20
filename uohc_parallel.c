@@ -16,6 +16,7 @@
 */
 
 /* Compilation tips
+    Use C99 to gain the benefits of the "restrict" keyword (in the few places i've used it, may even not make a difference...)
     (When using visual studio, you need to set this preprocessor macro: _CRT_SECURE_NO_WARNINGS)
 
     Enable every possible optimization (remember omit frame pointer) and disable every possible additional compiler security check.
@@ -36,6 +37,21 @@
 #include <signal.h>
 #include <time.h>
 
+#ifdef _WIN32
+    #include <malloc.h>
+    #ifdef _MSC_VER
+        #define alloca _alloca
+        #define ptr_restrict __restrict
+    #endif
+#else
+    #include <alloca.h>
+    #if __STDC_VERSION__ >= 199901L // C99
+        #define ptr_restrict restrict
+    #else
+        #define ptr_restrict
+    #endif
+#endif
+
 /*
 #if defined (_WIN32)
     #define WIN32_LEAN_AND_MEAN
@@ -46,24 +62,16 @@
 #endif
 */
 
-#ifdef _WIN32
-    #include <malloc.h>
-    #ifdef _MSC_VER
-        #define alloca _alloca
-    #endif
-#else
-    #include <alloca.h>
+#if defined (_OPENMP)
+    #define PARALLELIZATION 1
+    #include <omp.h>
 #endif
 
 
 //Size for the char array containing input (before transferring it into different variables)
 #define MAX_ARG_LEN 60
 
-#if defined (_OPENMP)
-    #define PARALLELIZATION 1
-#else
-    #define PARALLELIZATION 0
-#endif
+
 
 typedef unsigned long long ullong;
 
@@ -85,8 +93,8 @@ unsigned int charset_len;
 unsigned int key_maxlen;
 
 // to manage the process
-int working = 0;
-int stop = 0;
+unsigned char working = 0;
+unsigned char stop = 0;
 char* key;			//for the matching (cracked) string (prefix+filename+suffix)
 
 
@@ -96,6 +104,10 @@ void sig_handler(int signo)
 {
     if (working)
         stop = 1;
+    // TODO: need an idea on how to improve this... Dunno if "stop = 1" is an atomic operation. If it isn't,
+    //  if we set here stop = 1 while a thread is reading the same variable (at the same time) we'll have a data race 
+    //  with undefined behavior, maybe even a crash? C11 (still unsupported by VS 2019...) has the _Atomic specifier, but even using another
+    //  compiler i don't know if using _Atomic would slow down the read...
 }
 
 
@@ -115,18 +127,17 @@ void pre_exit(int force)
 
 //This is a slightly optimized adaptation of the C# algorithm by Malganis, which is included in Mythic Package Editor sources
 static inline ullong hashcalc(
-    const char* str,
+    const char * ptr_restrict const str,
     const unsigned int concatenated_len,// pre calculated length of str
     const uint32_t hash_magic           // pre calculated magic value, dependant on the length of str
 )
 {
     uint32_t eax, ecx, edx, ebx, esi, edi;
-
     eax = ecx = edx = 0;
     ebx = edi = esi = hash_magic;
     //ebx = edi = esi = (uint32_t)concatenated_len + 0xDEADBEEF;
 
-    unsigned int i, diff;
+    unsigned int i;
 
     for (i = 0; i + 12 < concatenated_len; i += 12)
     {
@@ -148,122 +159,24 @@ static inline ullong hashcalc(
         edi += ebx;
     }
 
-    diff = (concatenated_len - i);
-    if (diff > 0)
+    
+    if (concatenated_len > i) // (diff( = concatenated_len - i) > 0)
     {
-        if (diff == 12)
+        switch (concatenated_len - i)
         {
-            esi += (uint32_t)str[i + 11] << 24;
-            esi += (uint32_t)str[i + 10] << 16;
-            esi += (uint32_t)str[i + 9] << 8;
-            esi += (uint32_t)str[i + 8];
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 11)
-        {
-            esi += (uint32_t)str[i + 10] << 16;
-            esi += (uint32_t)str[i + 9] << 8;
-            esi += (uint32_t)str[i + 8];
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 10)
-        {
-            esi += (uint32_t)str[i + 9] << 8;
-            esi += (uint32_t)str[i + 8];
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 9)
-        {
-            esi += (uint32_t)str[i + 8];
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 8)
-        {
-            edi += (uint32_t)str[i + 7] << 24;
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 7)
-        {
-            edi += (uint32_t)str[i + 6] << 16;
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 6)
-        {
-            edi += (uint32_t)str[i + 5] << 8;
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 5)
-        {
-            edi += (uint32_t)str[i + 4];
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 4)
-        {
-            ebx += (uint32_t)str[i + 3] << 24;
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 3)
-        {
-            ebx += (uint32_t)str[i + 2] << 16;
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 2)
-        {
-            ebx += (uint32_t)str[i + 1] << 8;
-            ebx += (uint32_t)str[i];
-        }
-        else if (diff == 1)
-        {
-            ebx += (uint32_t)str[i];
+            case 12:    esi += (uint32_t)str[i + 11] << 24;
+            case 11:    esi += (uint32_t)str[i + 10] << 16;
+            case 10:    esi += (uint32_t)str[i + 9] << 8;
+            case 9:     esi += (uint32_t)str[i + 8];
+            case 8:     edi += (uint32_t)str[i + 7] << 24;
+            case 7:     edi += (uint32_t)str[i + 6] << 16;
+            case 6:     edi += (uint32_t)str[i + 5] << 8;
+            case 5:     edi += (uint32_t)str[i + 4];
+            case 4:     ebx += (uint32_t)str[i + 3] << 24;
+            case 3:     ebx += (uint32_t)str[i + 2] << 16;
+            case 2:     ebx += (uint32_t)str[i + 1] << 8;
+            case 1:     ebx += (uint32_t)str[i];
+            default:    break;
         }
 
         esi = (esi ^ edi) - ((edi >> 18) ^ (edi << 14));
@@ -292,7 +205,7 @@ static void crack_seed_range(
     unsigned int concatenated_len;   //length of the strings generated for this cycle, concatenated to prefix and suffix
     concatenated_len = prefix_len + generated_len + suffix_len;
 
-    #pragma omp parallel shared(stop) if (PARALLELIZATION)
+    #pragma omp parallel if (PARALLELIZATION)
     {
         /* initialize the arrays that will contain the generated and the concatenated string */
 
@@ -306,7 +219,7 @@ static void crack_seed_range(
         // where to start placing the generated characters in the pre-concatenated string
         char * const generate_offset = concatenated + prefix_len;
 
-        const char * const local_charset = alloca((charset_len + 1) * sizeof(char));
+        const char * ptr_restrict const local_charset = alloca((charset_len + 1) * sizeof(char));
         memcpy((char*)local_charset, charset, (charset_len + 1) * sizeof(char));
 
         // prepare this value for hash function; it's convenient to do this operation once for
@@ -329,9 +242,7 @@ static void crack_seed_range(
             #pragma omp for schedule(static) private(seed)
             for (seed = (unsigned int)seed_len_first; seed < uint_seed_len_slast; ++seed)
             {
-#if defined(PARALLELIZATION)
-                if (!stop)	// need to check if we have finished by this way because of OpenMP
-#endif
+                if (!stop) // need to check if we have finished by this way because of OpenMP
                 {
                     /* generate the string from the seed */
                     unsigned int seed_p = seed;
@@ -349,11 +260,12 @@ static void crack_seed_range(
                             stop = 1;
                             strcpy(key, concatenated);
                         }
-#if !defined(PARALLELIZATION)
-                        return;
-#endif
                     }
                 }
+#if !defined(PARALLELIZATION)
+                else
+                    break;
+#endif
             }
         }
         else
@@ -362,9 +274,7 @@ static void crack_seed_range(
             #pragma omp for schedule(static) private(seed)
             for (seed = seed_len_first; seed < seed_len_slast; ++seed)
             {
-#if defined(PARALLELIZATION)
-                if (!stop)	// need to check if we have finished by this way because of OpenMP
-#endif
+                if (!stop) // need to check if we have finished by this way because of OpenMP
                 {
                     /* generate the string from the seed */
                     ullong seed_p = seed;
@@ -382,10 +292,11 @@ static void crack_seed_range(
                             stop = 1;
                             strcpy(key, concatenated);
                         }
-#if !defined(PARALLELIZATION)
-                        return;
-#endif
                     }
+#if !defined(PARALLELIZATION)
+                    else
+                        break;
+#endif
                 }
             }
         }
@@ -410,6 +321,7 @@ static inline ullong my_pow(const unsigned int base, const unsigned int exp) //m
 
 static void start_crack()
 {
+    stop = 0;
     working = 1;
 
     /*	Initializing  */
@@ -459,11 +371,11 @@ static void start_crack()
     //ullong seed = 0;          //seed from which the string is generated; seed determine both length and characters
     for (generated_len = filename_minlen; (generated_len <= filename_maxlen) && !stop; ++generated_len)
     {
-        seed_len_first = combinations_len[generated_len - 1];
-        seed_len_slast = combinations_len[generated_len];
         time(&t);
         printf("Checking passwords width [ %d ]...   Started: %s", generated_len, asctime(localtime(&t)));
 
+        seed_len_first = combinations_len[generated_len - 1];
+        seed_len_slast = combinations_len[generated_len];
         crack_seed_range(generated_len, seed_len_first, seed_len_slast);
     }
 
@@ -480,7 +392,7 @@ static void start_crack()
 int main()
 {
     printf("UOHC: Ultima Online UOP Hash Cracker.");
-    printf("\nv2.0.1 CPU PARALLEL algorithm.");
+    printf("\nv2.0.2 CPU PARALLEL algorithm.");
 #if (PARALLELIZATION)
     printf("\nCompiled with OpenMP support (multi-threaded): on a decent multi-core cpu is faster than SERIAL algorithm.");
 #else
@@ -668,8 +580,6 @@ int main()
         } while ((another_hash != 'y') && (another_hash != 'n'));
         if (another_hash == 'n')
             break;
-
-        stop = 0;
     }
 
     pre_exit(0);
